@@ -23,7 +23,9 @@ parser.add_argument('-rd', '--random', type=bool, default=False, help='Whether t
 parser.add_argument('-rt', '--rating', type=int, default=0, help='Rating filter. Only integers between 1 (one star) and 5 (five stars) are meaningful')
 parser.add_argument('-s', '--sort-by-time', type=bool, default=False,
                     help='Whether to sort chronologically (neareast first). Default is False, as default sort order is by rating.')
-parser.add_argument('-m', '--mode', type=str, default='movie', choices=['book', 'movie', 'music'], help='"movie", "music" or "book". In "music" mode, cell height will be the same as cell width.')
+parser.add_argument('-m', '--mode', type=str, default='movie', 
+                    choices=['book', 'movie', 'music', 'game'], 
+                    help='"movie", "music", "book" or "game". In "music" mode, cell height will be the same as cell width.')
 parser.add_argument('-t', '--threshold', type=int, default=300,
                     help='Number of cached images to pertain. Once the number goes beyond this threshold, '
                     'unused cache gets removed. Set to 0 to immediately remove unused cache after a run. Set to negative to disable cache.')
@@ -31,9 +33,21 @@ parser.add_argument('-l', '--limit', type=int, default=200,
                     help='Limit of number of items to process. Default is 200. Raise this when COL x ROW > 200.')
 parser.add_argument('--max-width', type=int, default=4000, help='Maximum width of the output in pixel number.')
 parser.add_argument('--max-height', type=int, default=8000, help='Maximum height of the output in pixel number.')
+parser.add_argument('-a', '--adult', action='store_true', help='启用成人内容过滤')
 args = parser.parse_args()
+
+# 添加成人内容过滤列表
+_ADULT_KEYWORDS = [
+    '奴隶', '灵龙岛', 
+    '潟湖茶座', 'Lagoon Lounge', 
+    '公寓de·M', 
+    '骑士学院',
+    '笨蛋部',
+    '家有大貓'
+]
 _MUSIC_MODE = args.mode == 'music'
 _BOOK_MODE = args.mode == 'book'
+_GAME_MODE = args.mode == 'game'
 _COLUMN_NUM = args.col
 _ROW_NUM = args.row
 _OFFSET = args.offset
@@ -67,7 +81,9 @@ else:
         exit()
     id = match[1]
 start = range(0, args.limit, 15)
-urls = (f'https://{args.mode}.douban.com/people/{id}/collect?'
+urls = (f'https://www.douban.com/people/{id}/games?action=collect&start={x}'
+        if _GAME_MODE else
+        f'https://{args.mode}.douban.com/people/{id}/collect?'
         f'start={x}&sort={"time" if args.sort_by_time else "rating"}'
         f'&rating={"all" if args.rating<1 or args.rating>5 else args.rating}'
         f'&filter=all&mode=grid&tags_sort=count'
@@ -76,20 +92,52 @@ headers = {'User-Agent': _UA}
 
 items = []
 enough_met = False
-rating_span_regex = re.compile('rating(\d)-t')
+rating_span_regex = re.compile(r'rating(\d)-t')
 for url in urls:
     headers['Referer'] = url
     response = requests.get(url, headers=headers).text
     soup = BeautifulSoup(response, features='html.parser')
 
-    item_divs = soup.find_all('li', {'class': 'subject-item'}) if _BOOK_MODE else soup.find_all('div', {'class': 'item'})
+    # Modify the item_divs parsing for game mode
+    item_divs = (soup.find_all('div', {'class': 'common-item'}) if _GAME_MODE else
+                 soup.find_all('li', {'class': 'subject-item'}) if _BOOK_MODE
+                 else soup.find_all('div', {'class': 'item'}))
     if not item_divs:
         break
     for item_div in item_divs:
-        name = item_div.find('a', title=True)['title'] if _BOOK_MODE else item_div.find('em').text
-        img_url = item_div.find('a', {'class': 'nbg'}).find('img', recursive=False)['src']
-        rating_span = item_div.find('span', {'class': rating_span_regex})
-        rating = int(re.match(rating_span_regex, rating_span['class'][0])[1]) if rating_span else 0
+        if _GAME_MODE:
+            name = item_div.find('div', {'class': 'title'}).find('a').text.strip()
+            
+            # 添加成人内容过滤
+            if args.adult and any(keyword in name for keyword in _ADULT_KEYWORDS):
+                print(f"Filtered adult content: {name}")
+                continue
+                
+            img_url = item_div.find('img')['src']
+            # 修改游戏评分获取逻辑
+            rating_star = item_div.find('span', {'class': lambda x: x and 'allstar' in x})
+            if rating_star:
+                print(f"Found rating star for {name}")
+                rating_class = rating_star.get('class', [])
+                for cls in rating_class:
+                    if 'allstar' in cls:
+                        try:
+                            rating = int(re.search(r'allstar(\d+)', cls).group(1)) // 10
+                            print(f"Found rating value: {rating}")
+                            break
+                        except:
+                            rating = 0
+            else:
+                print(f"No rating star found for {name}")
+                rating = 0
+            print(f"Game: {name}, Rating: {rating}")
+        else:
+            name = (item_div.find('a', title=True)['title'] if _BOOK_MODE
+                   else item_div.find('em').text)
+            img_url = item_div.find('a', {'class': 'nbg'}).find('img', recursive=False)['src']
+            rating_span = item_div.find('span', {'class': rating_span_regex})
+            rating = int(re.match(rating_span_regex, rating_span['class'][0])[1]) if rating_span else 0
+        
         items.append(Item(name, img_url, rating))
         if len(items) >= _COLUMN_NUM * _ROW_NUM - len(skip_image_index):
             enough_met = True
@@ -124,14 +172,16 @@ for j in range(0, _HEIGHT, _CELL_HEIGHT):
         size = (_CELL_WIDTH, _CELL_HEIGHT)
         if need_large:
             size = (_CELL_WIDTH * 2, _CELL_HEIGHT * 2)
-            if _MUSIC_MODE or _BOOK_MODE:
-                image_url = image_url.replace('subject/s', 'subject/l')
+            if _MUSIC_MODE or _BOOK_MODE or _GAME_MODE:
+                image_url = image_url.replace('subject/s', 'subject/l').replace('spic', 'lpic')
             else:
                 image_url = image_url.replace('s_ratio_poster', 'l_ratio_poster')
-        elif _MUSIC_MODE or _BOOK_MODE:
-            image_url = image_url.replace('subject/s', 'subject/m')
         else:
-            image_url = image_url.replace('s_ratio_poster', 'm_ratio_poster')
+            size = (_CELL_WIDTH, _CELL_HEIGHT)
+            if _MUSIC_MODE or _BOOK_MODE or _GAME_MODE:
+                image_url = image_url.replace('subject/s', 'subject/m').replace('spic', 'mpic')
+            else:
+                image_url = image_url.replace('s_ratio_poster', 'm_ratio_poster')
         count += 1
 
         cache_img_name = _CACHE + image_url[image_url.rfind('/') + 1:]
